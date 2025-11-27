@@ -147,23 +147,41 @@ async def health_check():
 )
 async def get_recommendations(
     customer_id: int,
-    limit: int = Query(default=5, ge=1, le=20, description="Number of recommendations")
+    limit: int = Query(default=5, ge=1, le=20, description="Number of recommendations"),
+    strategy: RecommendationStrategy = Query(default=RecommendationStrategy.HYBRID, description="Recommendation strategy")
 ):
     """
     Get personalized product recommendations for a customer.
 
     - **customer_id**: Customer ID
     - **limit**: Number of recommendations to return (1-20)
+    - **strategy**: Recommendation strategy (hybrid, cf, content, popular)
 
     Returns list of recommended products with scores and reasoning.
     """
     try:
-        logger.info(f"Getting recommendations for customer {customer_id}")
+        logger.info(f"Getting {strategy} recommendations for customer {customer_id}")
 
-        recommendations = recommendation_engine.get_recommendations(
-            customer_id=customer_id,
-            top_n=limit
-        )
+        # Select recommender based on strategy
+        if strategy == RecommendationStrategy.HYBRID:
+            recommendations = hybrid_recommender.get_recommendations(
+                customer_id=customer_id,
+                top_n=limit
+            )
+        elif strategy == RecommendationStrategy.CF:
+            recommendations = cf_recommender.get_recommendations(
+                customer_id=customer_id,
+                top_n=limit
+            )
+        elif strategy == RecommendationStrategy.CONTENT:
+            recommendations = content_recommender.get_recommendations(
+                customer_id=customer_id,
+                top_n=limit
+            )
+        elif strategy == RecommendationStrategy.POPULAR:
+            recommendations = cf_recommender.get_popular_products(top_n=limit)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unknown strategy: {strategy}")
 
         return [
             RecommendationResponse(
