@@ -15,20 +15,21 @@ interface Product {
 
 interface RecommendedProductsProps {
   customerId: number;
+  limit?: number;
 }
 
-export default function RecommendedProducts({ customerId }: RecommendedProductsProps) {
+export default function RecommendedProducts({ customerId, limit = 5 }: RecommendedProductsProps) {
   const [recommendations, setRecommendations] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     loadRecommendations();
-  }, [customerId]);
+  }, [customerId, limit]);
 
   const loadRecommendations = async (): Promise<void> => {
     try {
       setLoading(true);
-      const data = await getRecommendations(customerId);
+      const data = await getRecommendations(customerId, limit);
       setRecommendations(data || []);
     } catch (error) {
       console.error('Failed to load recommendations:', error);

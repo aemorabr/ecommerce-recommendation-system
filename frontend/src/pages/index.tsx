@@ -19,7 +19,8 @@ export default function Home() {
   const [categories, setCategories] = useState<string[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [loading, setLoading] = useState<boolean>(true);
-  const [customerId] = useState<number>(1); // Demo: hardcoded customer ID
+  const [customerId, setCustomerId] = useState<number>(1);
+  const [recommendationLimit, setRecommendationLimit] = useState<number>(5);
 
   useEffect(() => {
     loadData();
@@ -57,15 +58,60 @@ export default function Home() {
               E-Commerce Store
             </h1>
             <p className="mt-2 text-sm text-gray-600">
-              Powered by AI Recommendations
+              Powered by AI Recommendations-Allan Mora &lt;allanmb@me.com&gt;
             </p>
           </div>
         </header>
 
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          {/* Test Form Section */}
+          <section className="mb-8 bg-white rounded-lg shadow-sm p-6">
+            <h2 className="text-xl font-bold text-gray-900 mb-4">
+              Test Recommendations
+            </h2>
+            <div className="flex flex-wrap gap-4 items-end">
+              <div className="flex-1 min-w-[200px]">
+                <label htmlFor="customerId" className="block text-sm font-medium text-gray-700 mb-2">
+                  Customer ID
+                </label>
+                <input
+                  id="customerId"
+                  type="number"
+                  min="1"
+                  max="500"
+                  value={customerId}
+                  onChange={(e) => setCustomerId(parseInt(e.target.value) || 1)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                  placeholder="Enter customer ID (1-500)"
+                />
+              </div>
+              <div className="flex-1 min-w-[200px]">
+                <label htmlFor="limit" className="block text-sm font-medium text-gray-700 mb-2">
+                  Number of Recommendations
+                </label>
+                <input
+                  id="limit"
+                  type="number"
+                  min="1"
+                  max="20"
+                  value={recommendationLimit}
+                  onChange={(e) => setRecommendationLimit(parseInt(e.target.value) || 5)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+                  placeholder="Enter limit (1-20)"
+                />
+              </div>
+              <div className="flex-shrink-0">
+                <p className="text-sm text-gray-500">
+                  Customer: <span className="font-semibold text-gray-900">{customerId}</span> |
+                  Limit: <span className="font-semibold text-gray-900">{recommendationLimit}</span>
+                </p>
+              </div>
+            </div>
+          </section>
+
           {/* Recommendations Section */}
           <section className="mb-12">
-            <RecommendedProducts customerId={customerId} />
+            <RecommendedProducts customerId={customerId} limit={recommendationLimit} />
           </section>
 
           {/* Products Section */}
