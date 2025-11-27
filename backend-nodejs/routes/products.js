@@ -61,10 +61,11 @@ router.get('/recommendations/:customerId', async (req, res) => {
     try {
         const { customerId } = req.params;
         const limit = req.query.limit || 5;
+        const strategy = req.query.strategy || 'hybrid';
 
         // Call ML service
         const mlResponse = await axios.get(
-            `${ML_SERVICE_URL}/recommendations/${customerId}?limit=${limit}`
+            `${ML_SERVICE_URL}/recommendations/${customerId}?limit=${limit}&strategy=${strategy}`
         );
 
         const recommendations = mlResponse.data;

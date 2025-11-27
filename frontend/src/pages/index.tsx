@@ -21,6 +21,7 @@ export default function Home() {
   const [loading, setLoading] = useState<boolean>(true);
   const [customerId, setCustomerId] = useState<number>(1);
   const [recommendationLimit, setRecommendationLimit] = useState<number>(5);
+  const [strategy, setStrategy] = useState<string>('hybrid');
 
   useEffect(() => {
     loadData();
@@ -86,6 +87,22 @@ export default function Home() {
                 />
               </div>
               <div className="flex-1 min-w-[200px]">
+                <label htmlFor="strategy" className="block text-sm font-medium text-gray-700 mb-2">
+                  Recommendation Strategy
+                </label>
+                <select
+                  id="strategy"
+                  value={strategy}
+                  onChange={(e) => setStrategy(e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-primary-500 focus:border-transparent bg-white"
+                >
+                  <option value="hybrid">🔀 Hybrid (CF + Content)</option>
+                  <option value="cf">👥 Collaborative Filtering</option>
+                  <option value="content">📝 Content-Based</option>
+                  <option value="popular">🔥 Popular Products</option>
+                </select>
+              </div>
+              <div className="flex-1 min-w-[200px]">
                 <label htmlFor="limit" className="block text-sm font-medium text-gray-700 mb-2">
                   Number of Recommendations
                 </label>
@@ -103,6 +120,7 @@ export default function Home() {
               <div className="flex-shrink-0">
                 <p className="text-sm text-gray-500">
                   Customer: <span className="font-semibold text-gray-900">{customerId}</span> |
+                  Strategy: <span className="font-semibold text-gray-900">{strategy}</span> |
                   Limit: <span className="font-semibold text-gray-900">{recommendationLimit}</span>
                 </p>
               </div>
@@ -111,7 +129,7 @@ export default function Home() {
 
           {/* Recommendations Section */}
           <section className="mb-12">
-            <RecommendedProducts customerId={customerId} limit={recommendationLimit} />
+            <RecommendedProducts customerId={customerId} limit={recommendationLimit} strategy={strategy} />
           </section>
 
           {/* Products Section */}

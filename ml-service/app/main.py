@@ -168,18 +168,26 @@ async def get_recommendations(
                 customer_id=customer_id,
                 top_n=limit
             )
-        elif strategy == RecommendationStrategy.CF:
+        elif strategy == RecommendationStrategy.COLLABORATIVE:
             recommendations = cf_recommender.get_recommendations(
                 customer_id=customer_id,
                 top_n=limit
             )
-        elif strategy == RecommendationStrategy.CONTENT:
+        elif strategy == RecommendationStrategy.CONTENT_BASED:
             recommendations = content_recommender.get_recommendations(
                 customer_id=customer_id,
                 top_n=limit
             )
         elif strategy == RecommendationStrategy.POPULAR:
-            recommendations = cf_recommender.get_popular_products(top_n=limit)
+            popular_products = db_service.get_popular_products(limit=limit)
+            recommendations = [
+                {
+                    'product_id': p['product_id'],
+                    'score': p['purchase_count'] / 100.0,
+                    'reason': 'popular'
+                }
+                for p in popular_products
+            ]
         else:
             raise HTTPException(status_code=400, detail=f"Unknown strategy: {strategy}")
 

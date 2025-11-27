@@ -30,9 +30,9 @@ export const getCategories = async (): Promise<any> => {
 };
 
 // Recommendations
-export const getRecommendations = async (customerId: number, limit: number = 5): Promise<any> => {
+export const getRecommendations = async (customerId: number, limit: number = 5, strategy: string = 'hybrid'): Promise<any> => {
   const response = await api.get(`/products/recommendations/${customerId}`, {
-    params: { limit }
+    params: { limit, strategy }
   });
   return response.data;
 };
