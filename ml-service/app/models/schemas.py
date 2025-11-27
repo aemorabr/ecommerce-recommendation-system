@@ -3,21 +3,34 @@ Pydantic models for request/response validation
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
+from enum import Enum
+
+class RecommendationStrategy(str, Enum):
+    COLLABORATIVE = "cf"
+    CONTENT_BASED = "content"
+    HYBRID = "hybrid"
+    POPULAR = "popular"
 
 class RecommendationResponse(BaseModel):
     """Response model for product recommendations"""
     product_id: int = Field(..., description="Product ID")
     score: float = Field(..., description="Recommendation score", ge=0)
     reason: str = Field(..., description="Reason for recommendation")
+    name: Optional[str] = Field(None, description="Product name")
+    category: Optional[str] = Field(None, description="Product category")
+    price: Optional[float] = Field(None, description="Product price")
 
     class Config:
         json_schema_extra = {
             "example": {
                 "product_id": 42,
                 "score": 0.85,
-                "reason": "customers_like_you"
+                "reason": "hybrid",
+                "name": "Wireless Headphones",
+                "category": "Electronics",
+                "price": 79.99
             }
         }
 

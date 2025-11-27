@@ -1,6 +1,19 @@
 import Image from 'next/image';
 
-export default function ProductGrid({ products }) {
+interface Product {
+  product_id: number;
+  name: string;
+  description: string;
+  price: number | string;
+  category: string;
+  image_url?: string;
+}
+
+interface ProductGridProps {
+  products: Product[];
+}
+
+export default function ProductGrid({ products }: ProductGridProps) {
   if (!products || products.length === 0) {
     return (
       <div className="text-center py-12">
@@ -40,7 +53,7 @@ export default function ProductGrid({ products }) {
 
             <div className="flex justify-between items-center">
               <span className="text-2xl font-bold text-gray-900">
-                ${parseFloat(product.price).toFixed(2)}
+                ${parseFloat(product.price.toString()).toFixed(2)}
               </span>
 
               <button className="px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors">

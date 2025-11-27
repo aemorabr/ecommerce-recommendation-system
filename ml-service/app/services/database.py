@@ -94,22 +94,45 @@ class DatabaseService:
             logger.error(f"Error fetching popular products: {e}")
             raise
 
-    def get_customer_purchases(self, customer_id: int) -> List[int]:
-        """Get list of product IDs purchased by a customer"""
+    def get_customer_purchases(self, customer_id: int) -> List[Dict[str, Any]]:
         query = """
-            SELECT DISTINCT product_id
-            FROM purchases
-            WHERE customer_id = %s
+            SELECT DISTINCT p.product_id, pr.name, pr.category, pr.price, pr.description
+            FROM purchases p
+            JOIN products pr ON p.product_id = pr.product_id
+            WHERE p.customer_id = %s
         """
 
         try:
-            cur = self.conn.cursor()
+            cur = self.conn.cursor(cursor_factory=RealDictCursor)
             cur.execute(query, (customer_id,))
             results = cur.fetchall()
             cur.close()
-            return [row[0] for row in results]
+            return [dict(row) for row in results]
         except Exception as e:
             logger.error(f"Error fetching customer purchases: {e}")
+            raise
+
+    def get_all_products(self) -> List[Dict[str, Any]]:
+        query = """
+            SELECT
+                product_id,
+                name,
+                category,
+                price,
+                description,
+                stock_quantity
+            FROM products
+            ORDER BY product_id
+        """
+
+        try:
+            cur = self.conn.cursor(cursor_factory=RealDictCursor)
+            cur.execute(query)
+            results = cur.fetchall()
+            cur.close()
+            return [dict(row) for row in results]
+        except Exception as e:
+            logger.error(f"Error fetching all products: {e}")
             raise
 
     def get_total_customers(self) -> int:

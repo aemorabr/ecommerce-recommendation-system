@@ -7,6 +7,10 @@ FROM node:18-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
+
+# Create public directory if it doesn't exist
+RUN mkdir -p public
+
 RUN npm run build
 
 FROM node:18-alpine AS runner
@@ -17,7 +21,10 @@ ENV NODE_ENV production
 RUN addgroup --system --gid 1001 nodejs
 RUN adduser --system --uid 1001 nextjs
 
+# Copy public folder if it exists
 COPY --from=builder /app/public ./public
+
+# Copy standalone build
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 

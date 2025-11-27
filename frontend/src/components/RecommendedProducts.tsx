@@ -2,15 +2,30 @@ import { useEffect, useState } from 'react';
 import Image from 'next/image';
 import { getRecommendations } from '@/services/api';
 
-export default function RecommendedProducts({ customerId }) {
-  const [recommendations, setRecommendations] = useState([]);
+interface Product {
+  product_id: number;
+  name: string;
+  description?: string;
+  price: number | string;
+  category?: string;
+  image_url?: string;
+  recommendation_reason?: string;
+  score?: number;
+}
+
+interface RecommendedProductsProps {
+  customerId: number;
+}
+
+export default function RecommendedProducts({ customerId }: RecommendedProductsProps) {
+  const [recommendations, setRecommendations] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     loadRecommendations();
   }, [customerId]);
 
-  const loadRecommendations = async () => {
+  const loadRecommendations = async (): Promise<void> => {
     try {
       setLoading(true);
       const data = await getRecommendations(customerId);
@@ -41,7 +56,7 @@ export default function RecommendedProducts({ customerId }) {
     return null;
   }
 
-  const getReasonBadge = (reason) => {
+  const getReasonBadge = (reason?: string): JSX.Element => {
     if (reason === 'customers_like_you') {
       return (
         <span className="inline-flex items-center px-2 py-1 text-xs font-medium text-green-700 bg-green-50 rounded-full">
@@ -86,7 +101,7 @@ export default function RecommendedProducts({ customerId }) {
 
               <div className="flex justify-between items-center mt-2">
                 <span className="text-lg font-bold text-gray-900">
-                  ${parseFloat(product.price).toFixed(2)}
+                  ${parseFloat(product.price.toString()).toFixed(2)}
                 </span>
 
                 <button className="px-3 py-1 text-sm bg-primary-600 text-white rounded hover:bg-primary-700 transition-colors">

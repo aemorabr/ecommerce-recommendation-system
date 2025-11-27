@@ -13,11 +13,14 @@ import os
 
 from app.models.schemas import (
     RecommendationResponse,
+    RecommendationStrategy,
     SimilarCustomerResponse,
     HealthResponse,
     MetricsResponse
 )
 from app.services.recommendation_engine import RecommendationEngine
+from app.services.content_based_recommender import ContentBasedRecommender
+from app.services.hybrid_recommender import HybridRecommender
 from app.services.database import DatabaseService
 
 # Configure logging
@@ -29,12 +32,14 @@ logger = logging.getLogger(__name__)
 
 # Global instances
 db_service = None
-recommendation_engine = None
+cf_recommender = None
+content_recommender = None
+hybrid_recommender = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
-    global db_service, recommendation_engine
+    global db_service, cf_recommender, content_recommender, hybrid_recommender
 
     # Startup
     logger.info("Starting ML Recommendation Service...")
@@ -44,14 +49,28 @@ async def lifespan(app: FastAPI):
         db_service = DatabaseService()
         logger.info("✓ Database service initialized")
 
-        # Initialize recommendation engine
-        recommendation_engine = RecommendationEngine(db_service)
+        # Initialize collaborative filtering recommender
+        cf_recommender = RecommendationEngine(db_service)
+        logger.info("Loading data and training collaborative filtering model...")
+        cf_recommender.load_data()
+        cf_recommender.compute_similarity()
+        logger.info("✓ Collaborative filtering model ready")
 
-        # Load and train model
-        logger.info("Loading data and training model...")
-        recommendation_engine.load_data()
-        recommendation_engine.compute_similarity()
-        logger.info("✓ Model trained and ready")
+        # Initialize content-based recommender
+        content_recommender = ContentBasedRecommender(db_service)
+        logger.info("Loading data and training content-based model...")
+        content_recommender.load_data()
+        content_recommender.compute_similarity()
+        logger.info("✓ Content-based model ready")
+
+        # Initialize hybrid recommender
+        hybrid_recommender = HybridRecommender(
+            collaborative_recommender=cf_recommender,
+            content_based_recommender=content_recommender,
+            cf_weight=0.6,
+            content_weight=0.4
+        )
+        logger.info("✓ Hybrid recommender ready")
 
         yield
 
@@ -67,8 +86,8 @@ async def lifespan(app: FastAPI):
 # Create FastAPI app
 app = FastAPI(
     title="E-Commerce Recommendation API",
-    description="AI-powered product recommendation service using collaborative filtering",
-    version="1.0.0",
+    description="Hybrid AI-powered product recommendation service using collaborative filtering, content-based filtering, and popularity-based strategies",
+    version="2.0.0",
     lifespan=lifespan
 )
 
@@ -99,7 +118,11 @@ async def health_check():
         db_healthy = db_service.check_connection()
 
         # Check model status
-        model_loaded = recommendation_engine.is_ready()
+        model_loaded = (
+            cf_recommender.is_ready() and
+            content_recommender is not None and
+            hybrid_recommender is not None
+        )
 
         status = "healthy" if (db_healthy and model_loaded) else "unhealthy"
 
@@ -116,7 +139,7 @@ async def health_check():
             model_loaded=False
         )
 
-# Get recommendations endpoint
+
 @app.get(
     "/recommendations/{customer_id}",
     response_model=List[RecommendationResponse],
@@ -174,7 +197,7 @@ async def get_similar_customers(
     try:
         logger.info(f"Finding similar customers for {customer_id}")
 
-        similar = recommendation_engine.get_similar_customers(
+        similar = cf_recommender.get_similar_customers(
             customer_id=customer_id,
             top_n=limit
         )
@@ -193,38 +216,79 @@ async def get_similar_customers(
         logger.error(f"Error finding similar customers: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Retrain model endpoint
+# Get similar products endpoint
+@app.get(
+    "/similar-products/{product_id}",
+    response_model=List[RecommendationResponse],
+    tags=["Recommendations"]
+)
+async def get_similar_products(
+    product_id: int,
+    limit: int = Query(default=5, ge=1, le=20)
+):
+    """
+    Find products similar to a given product.
+
+    - **product_id**: Product ID
+    - **limit**: Number of similar products to return (1-20)
+    """
+    try:
+        logger.info(f"Finding similar products for {product_id}")
+
+        similar = content_recommender.get_similar_products(
+            product_id=product_id,
+            top_n=limit
+        )
+
+        return [
+            RecommendationResponse(
+                product_id=rec['product_id'],
+                score=rec['score'],
+                reason=rec['reason'],
+                name=rec.get('name'),
+                category=rec.get('category'),
+                price=rec.get('price')
+            )
+            for rec in similar
+        ]
+
+    except Exception as e:
+        logger.error(f"Error finding similar products: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/retrain", tags=["Model Management"])
 async def retrain_model():
     """
-    Retrain the recommendation model with latest data.
+    Retrain all recommendation models with latest data.
     This should be called periodically or after significant data changes.
     """
     try:
-        logger.info("Retraining model...")
+        logger.info("Retraining all models...")
 
-        recommendation_engine.load_data()
-        recommendation_engine.compute_similarity()
+        cf_recommender.load_data()
+        cf_recommender.compute_similarity()
 
-        logger.info("✓ Model retrained successfully")
+        content_recommender.load_data()
+        content_recommender.compute_similarity()
+
+        logger.info("✓ All models retrained successfully")
 
         return {
             "status": "success",
-            "message": "Model retrained successfully",
-            "customers": recommendation_engine.get_customer_count(),
-            "products": recommendation_engine.get_product_count()
+            "message": "All models retrained successfully",
+            "customers": cf_recommender.get_customer_count(),
+            "products": cf_recommender.get_product_count()
         }
 
     except Exception as e:
         logger.error(f"Error retraining model: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Get model metrics endpoint
 @app.get("/metrics", response_model=MetricsResponse, tags=["Model Management"])
 async def get_metrics():
     """Get model performance metrics and statistics"""
     try:
-        metrics = recommendation_engine.get_metrics()
+        metrics = cf_recommender.get_metrics()
 
         return MetricsResponse(
             total_customers=metrics['total_customers'],
@@ -239,16 +303,28 @@ async def get_metrics():
         logger.error(f"Error getting metrics: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# Root endpoint
 @app.get("/", tags=["Info"])
 async def root():
     """API information"""
     return {
         "name": "E-Commerce Recommendation API",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "status": "running",
-        "docs": "/docs",
-        "health": "/health"
+        "strategies": {
+            "cf": "Collaborative Filtering (user-user similarity)",
+            "content": "Content-Based Filtering (product similarity)",
+            "hybrid": "Hybrid (60% CF + 40% Content)",
+            "popular": "Popularity-Based (trending products)"
+        },
+        "endpoints": {
+            "docs": "/docs",
+            "health": "/health",
+            "recommendations": "/recommendations/{customer_id}?strategy=hybrid&limit=5",
+            "similar_customers": "/similar-customers/{customer_id}",
+            "similar_products": "/similar-products/{product_id}",
+            "metrics": "/metrics",
+            "retrain": "/retrain"
+        }
     }
 
 if __name__ == "__main__":

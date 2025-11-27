@@ -11,26 +11,26 @@ const api = axios.create({
 });
 
 // Products
-export const getProducts = async (category = null, limit = 50, offset = 0) => {
-  const params = { limit, offset };
+export const getProducts = async (category: string | null = null, limit: number = 50, offset: number = 0): Promise<any> => {
+  const params: any = { limit, offset };
   if (category) params.category = category;
 
   const response = await api.get('/products', { params });
   return response.data;
 };
 
-export const getProduct = async (id) => {
+export const getProduct = async (id: number): Promise<any> => {
   const response = await api.get(`/products/${id}`);
   return response.data;
 };
 
-export const getCategories = async () => {
+export const getCategories = async (): Promise<any> => {
   const response = await api.get('/products/meta/categories');
   return response.data;
 };
 
 // Recommendations
-export const getRecommendations = async (customerId, limit = 5) => {
+export const getRecommendations = async (customerId: number, limit: number = 5): Promise<any> => {
   const response = await api.get(`/products/recommendations/${customerId}`, {
     params: { limit }
   });
@@ -38,20 +38,28 @@ export const getRecommendations = async (customerId, limit = 5) => {
 };
 
 // Customers
-export const getCustomer = async (id) => {
+export const getCustomer = async (id: number): Promise<any> => {
   const response = await api.get(`/customers/${id}`);
   return response.data;
 };
 
-export const getCustomerHistory = async (id, limit = 20, offset = 0) => {
+export const getCustomerHistory = async (id: number, limit: number = 20, offset: number = 0): Promise<any> => {
   const response = await api.get(`/customers/${id}/history`, {
     params: { limit, offset }
   });
   return response.data;
 };
 
-export const getCustomerAnalytics = async (id) => {
+export const getCustomerAnalytics = async (id: number): Promise<any> => {
   const response = await api.get(`/customers/${id}/analytics`);
+  return response.data;
+};
+
+// Search
+export const searchProducts = async (query: string, limit: number = 20): Promise<any> => {
+  const response = await api.get('/products/search', {
+    params: { q: query, limit }
+  });
   return response.data;
 };
 

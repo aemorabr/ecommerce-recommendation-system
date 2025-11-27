@@ -155,14 +155,24 @@ class RecommendationEngine:
             # Get top N products
             top_product_indices = np.argsort(scores)[::-1][:top_n]
 
+            # Fetch product details
+            all_products = self.db.get_all_products()
+            product_map = {p['product_id']: p for p in all_products}
+
             # Build recommendations
             recommendations = []
             for idx in top_product_indices:
                 if scores[idx] > 0:  # Only include products with positive scores
+                    product_id = int(self.product_ids[idx])
+                    product_info = product_map.get(product_id, {})
+
                     recommendations.append({
-                        'product_id': int(self.product_ids[idx]),
+                        'product_id': product_id,
                         'score': float(scores[idx]),
-                        'reason': 'customers_like_you'
+                        'reason': 'customers_like_you',
+                        'name': product_info.get('name', ''),
+                        'category': product_info.get('category', ''),
+                        'price': float(product_info.get('price', 0.0))
                     })
 
             # If we don't have enough recommendations, fill with popular items
@@ -235,14 +245,24 @@ class RecommendationEngine:
         try:
             popular = self.db.get_popular_products(limit=top_n)
 
-            return [
-                {
-                    'product_id': int(item['product_id']),
+            all_products = self.db.get_all_products()
+            product_map = {p['product_id']: p for p in all_products}
+
+            recommendations = []
+            for item in popular:
+                product_id = int(item['product_id'])
+                product_info = product_map.get(product_id, {})
+
+                recommendations.append({
+                    'product_id': product_id,
                     'score': float(item['purchase_count']),
-                    'reason': 'popular'
-                }
-                for item in popular
-            ]
+                    'reason': 'popular',
+                    'name': product_info.get('name', ''),
+                    'category': product_info.get('category', ''),
+                    'price': float(product_info.get('price', 0.0))
+                })
+
+            return recommendations
 
         except Exception as e:
             logger.error(f"Error getting popular items: {e}")

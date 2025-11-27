@@ -5,12 +5,21 @@ import RecommendedProducts from '@/components/RecommendedProducts';
 import CategoryFilter from '@/components/CategoryFilter';
 import { getProducts, getCategories } from '@/services/api';
 
+interface Product {
+  product_id: number;
+  name: string;
+  description: string;
+  price: number | string;
+  category: string;
+  image_url?: string;
+}
+
 export default function Home() {
-  const [products, setProducts] = useState([]);
-  const [categories, setCategories] = useState([]);
-  const [selectedCategory, setSelectedCategory] = useState('all');
-  const [loading, setLoading] = useState(true);
-  const [customerId] = useState(1); // Demo: hardcoded customer ID
+  const [products, setProducts] = useState<Product[]>([]);
+  const [categories, setCategories] = useState<string[]>([]);
+  const [selectedCategory, setSelectedCategory] = useState<string>('all');
+  const [loading, setLoading] = useState<boolean>(true);
+  const [customerId] = useState<number>(1); // Demo: hardcoded customer ID
 
   useEffect(() => {
     loadData();
