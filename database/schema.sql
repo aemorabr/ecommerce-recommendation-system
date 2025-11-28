@@ -3,10 +3,16 @@
 
 -- Enable required extensions
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS "pgvector";
 
--- Drop existing tables if they exist
+-- Enable pgvector extension for vector similarity search
+-- Note: This requires pgvector to be installed on the PostgreSQL server
+-- Installation: https://github.com/pgvector/pgvector#installation
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Drop existing tables if they exist (in correct order due to foreign keys)
+DROP TABLE IF EXISTS product_embeddings CASCADE;
 DROP TABLE IF EXISTS customer_embeddings CASCADE;
+DROP TABLE IF EXISTS model_versions CASCADE;
 DROP TABLE IF EXISTS customer_features CASCADE;
 DROP TABLE IF EXISTS purchases CASCADE;
 DROP TABLE IF EXISTS customers CASCADE;
@@ -68,16 +74,69 @@ CREATE TABLE customer_features (
     updated_at TIMESTAMP DEFAULT NOW()
 );
 
--- Customer embeddings for similarity search
-CREATE TABLE customer_embeddings (
-    customer_id INT PRIMARY KEY REFERENCES customers(customer_id) ON DELETE CASCADE,
-    embedding vector(128), -- Adjust dimension based on your model
-    updated_at TIMESTAMP DEFAULT NOW()
+-- ============================================================================
+-- PGVECTOR TABLES FOR ML RECOMMENDATION SYSTEM
+-- ============================================================================
+
+-- Table to track model versions and their metadata
+CREATE TABLE model_versions (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    artifact_url TEXT,
+    params JSONB,
+    metrics JSONB,
+    dimension INT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT valid_dimension CHECK (dimension > 0)
 );
 
--- Create index for vector similarity search
-CREATE INDEX idx_customer_embeddings_vector ON customer_embeddings 
-USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100);
+-- Index for querying latest model versions
+CREATE INDEX idx_model_versions_created_at 
+    ON model_versions(created_at DESC);
+
+-- Table to store product embeddings (content-based vectors)
+CREATE TABLE product_embeddings (
+    product_id BIGINT PRIMARY KEY,
+    embedding vector(128) NOT NULL,
+    model_version_id INT NOT NULL REFERENCES model_versions(id) ON DELETE CASCADE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT fk_product_exists 
+        FOREIGN KEY (product_id) REFERENCES products(product_id) ON DELETE CASCADE
+);
+
+-- Table to store customer embeddings (aggregated preference vectors)
+CREATE TABLE customer_embeddings (
+    customer_id BIGINT PRIMARY KEY,
+    embedding vector(128) NOT NULL,
+    model_version_id INT NOT NULL REFERENCES model_versions(id) ON DELETE CASCADE,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    CONSTRAINT fk_customer_exists 
+        FOREIGN KEY (customer_id) REFERENCES customers(customer_id) ON DELETE CASCADE
+);
+
+-- Index for filtering by model version
+CREATE INDEX idx_product_embeddings_model_version 
+    ON product_embeddings(model_version_id);
+
+CREATE INDEX idx_customer_embeddings_model_version 
+    ON customer_embeddings(model_version_id);
+
+-- ANN indexes for fast similarity search using IVFFlat
+-- Note: L2 distance for normalized vectors = cosine similarity
+-- Lists parameter: typically sqrt(row_count) for IVFFlat
+-- Start with 100 lists for datasets with ~10k rows, adjust based on your data size
+
+-- Product embeddings ANN index (L2 distance for normalized vectors = cosine similarity)
+CREATE INDEX idx_product_embeddings_ann 
+    ON product_embeddings 
+    USING ivfflat (embedding vector_l2_ops) 
+    WITH (lists = 100);
+
+-- Customer embeddings ANN index
+CREATE INDEX idx_customer_embeddings_ann 
+    ON customer_embeddings 
+    USING ivfflat (embedding vector_l2_ops) 
+    WITH (lists = 100);
 
 -- Function to refresh customer features
 CREATE OR REPLACE FUNCTION refresh_customer_features()
@@ -249,4 +308,8 @@ GROUP BY p.product_id, p.name, p.category, p.price;
 COMMENT ON TABLE products IS 'Product catalog with categories: Electronics, Clothing, Books, Home & Garden, Sports';
 COMMENT ON TABLE purchases IS 'Customer purchase history for recommendation engine';
 COMMENT ON TABLE customer_features IS 'Computed features for ML model, updated via triggers and batch jobs';
-COMMENT ON TABLE customer_embeddings IS 'Vector embeddings for customer similarity search using pgvector';
+COMMENT ON TABLE model_versions IS 'Tracks ML model versions with metadata and hyperparameters';
+COMMENT ON TABLE product_embeddings IS 'Stores content-based product embeddings for similarity search';
+COMMENT ON TABLE customer_embeddings IS 'Stores customer preference embeddings derived from purchase history';
+COMMENT ON COLUMN product_embeddings.embedding IS 'Normalized L2 vector (dimension 128) for cosine similarity via L2 distance';
+COMMENT ON COLUMN customer_embeddings.embedding IS 'Normalized L2 vector (dimension 128) representing customer preferences';

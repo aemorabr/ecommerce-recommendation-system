@@ -21,6 +21,7 @@ from app.models.schemas import (
 from app.services.recommendation_engine import RecommendationEngine
 from app.services.content_based_recommender import ContentBasedRecommender
 from app.services.hybrid_recommender import HybridRecommender
+from app.services.customer_embedding_generator import CustomerEmbeddingGenerator
 from app.services.database import DatabaseService
 
 # Configure logging
@@ -35,11 +36,12 @@ db_service = None
 cf_recommender = None
 content_recommender = None
 hybrid_recommender = None
+customer_embedding_generator = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
-    global db_service, cf_recommender, content_recommender, hybrid_recommender
+    global db_service, cf_recommender, content_recommender, hybrid_recommender, customer_embedding_generator
 
     # Startup
     logger.info("Starting ML Recommendation Service...")
@@ -51,17 +53,15 @@ async def lifespan(app: FastAPI):
 
         # Initialize collaborative filtering recommender
         cf_recommender = RecommendationEngine(db_service)
-        logger.info("Loading data and training collaborative filtering model...")
-        cf_recommender.load_data()
-        cf_recommender.compute_similarity()
-        logger.info("✓ Collaborative filtering model ready")
+        logger.info("✓ Collaborative filtering engine initialized")
 
         # Initialize content-based recommender
         content_recommender = ContentBasedRecommender(db_service)
-        logger.info("Loading data and training content-based model...")
-        content_recommender.load_data()
-        content_recommender.compute_similarity()
-        logger.info("✓ Content-based model ready")
+        logger.info("✓ Content-based engine initialized")
+
+        # Initialize customer embedding generator
+        customer_embedding_generator = CustomerEmbeddingGenerator(db_service)
+        logger.info("✓ Customer embedding generator ready")
 
         # Initialize hybrid recommender
         hybrid_recommender = HybridRecommender(
@@ -71,6 +71,8 @@ async def lifespan(app: FastAPI):
             content_weight=0.4
         )
         logger.info("✓ Hybrid recommender ready")
+        
+        logger.info("⚠️  Run POST /retrain to load data and compute embeddings")
 
         yield
 
@@ -118,25 +120,25 @@ async def health_check():
         db_healthy = db_service.check_connection()
 
         # Check model status
-        model_loaded = (
+        recommendations_ready = (
             cf_recommender.is_ready() and
             content_recommender is not None and
             hybrid_recommender is not None
         )
 
-        status = "healthy" if (db_healthy and model_loaded) else "unhealthy"
+        status = "healthy" if (db_healthy and recommendations_ready) else "unhealthy"
 
         return HealthResponse(
             status=status,
             database_connected=db_healthy,
-            model_loaded=model_loaded
+            recommendations_ready=recommendations_ready
         )
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         return HealthResponse(
             status="unhealthy",
             database_connected=False,
-            model_loaded=False
+            recommendations_ready=False
         )
 
 
@@ -158,6 +160,8 @@ async def get_recommendations(
     - **strategy**: Recommendation strategy (hybrid, cf, content, popular)
 
     Returns list of recommended products with scores and reasoning.
+    
+    Note: All strategies now use pgvector-backed embeddings for similarity search.
     """
     try:
         logger.info(f"Getting {strategy} recommendations for customer {customer_id}")
@@ -285,25 +289,93 @@ async def get_similar_products(
 @app.post("/retrain", tags=["Model Management"])
 async def retrain_model():
     """
-    Retrain all recommendation models with latest data.
-    This should be called periodically or after significant data changes.
+    Retrain all recommendation models and persist embeddings to pgvector.
+    
+    This endpoint:
+    1. Loads purchase and product data
+    2. Computes collaborative filtering (customer embeddings)
+    3. Computes content-based filtering (product embeddings via TF-IDF)
+    4. Generates customer preference embeddings
+    5. Stores all embeddings to database with version tracking
+    
+    Returns:
+        - model_version_id: ID of the created model version
+        - product_embeddings: Number of product embeddings stored
+        - customer_embeddings_cf: Number of CF-based customer embeddings
+        - customer_embeddings_content: Number of content-based customer embeddings
+        - customers: Total customers in model
+        - products: Total products in model
     """
     try:
-        logger.info("Retraining all models...")
+        if not db_service.pgvector_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail="pgvector extension is required but not enabled. Please install and enable pgvector."
+            )
+        
+        logger.info("Starting model retrain with pgvector embedding storage...")
 
+        # Load collaborative filtering data
         cf_recommender.load_data()
-        cf_recommender.compute_similarity()
-
+        
+        # Load content-based data
         content_recommender.load_data()
-        content_recommender.compute_similarity()
+        
+        # Determine embedding dimensions
+        cf_dim = cf_recommender.get_embedding_dimension()  # Based on number of products
+        content_dim = content_recommender.get_embedding_dimension()  # Based on TF-IDF features
+        
+        logger.info(f"CF dimension: {cf_dim}, Content dimension: {content_dim}")
 
-        logger.info("✓ All models retrained successfully")
+        # Create model version record
+        model_version_id = db_service.log_new_model_version(
+            name="hybrid_recommendation_model",
+            dimension=content_dim,  # Use content dimension for product embeddings
+            params={
+                "content_based": {
+                    "tfidf_max_features": content_recommender.tfidf_vectorizer.max_features,
+                    "ngram_range": list(content_recommender.tfidf_vectorizer.ngram_range)
+                },
+                "collaborative_filtering": {
+                    "cf_embedding_dim": cf_dim,
+                    "normalization": "l2"
+                }
+            },
+            metrics={
+                "total_customers": cf_recommender.get_customer_count(),
+                "total_products": cf_recommender.get_product_count(),
+                "matrix_sparsity": cf_recommender._calculate_sparsity()
+            }
+        )
+
+        logger.info(f"✓ Created model version {model_version_id}")
+
+        # Compute and store product embeddings (content-based TF-IDF)
+        content_recommender.compute_similarity(model_version_id)
+        
+        # Compute and store customer embeddings (CF-based)
+        cf_recommender.compute_similarity(model_version_id)
+        
+        # Generate and store customer embeddings (content-based: aggregated from purchases)
+        customer_count_content = customer_embedding_generator.generate_and_store_embeddings(
+            model_version_id,
+            weight_by_quantity=True
+        )
+        
+        # Get final counts
+        embedding_counts = db_service.count_embeddings()
+
+        logger.info("✓ All models retrained and embeddings persisted successfully")
 
         return {
             "status": "success",
-            "message": "All models retrained successfully",
+            "message": "All models retrained and embeddings stored in database",
+            "model_version_id": model_version_id,
             "customers": cf_recommender.get_customer_count(),
-            "products": cf_recommender.get_product_count()
+            "products": cf_recommender.get_product_count(),
+            "product_embeddings": embedding_counts['products'],
+            "customer_embeddings": embedding_counts['customers'],
+            "embedding_dimension": content_dim
         }
 
     except Exception as e:
@@ -321,7 +393,7 @@ async def get_metrics():
             total_products=metrics['total_products'],
             total_purchases=metrics['total_purchases'],
             avg_purchases_per_customer=metrics['avg_purchases_per_customer'],
-            model_last_trained=metrics['model_last_trained'],
+            last_trained_at=metrics['model_last_trained'],
             sparsity=metrics['sparsity']
         )
 
@@ -332,16 +404,21 @@ async def get_metrics():
 @app.get("/", tags=["Info"])
 async def root():
     """API information"""
+    embedding_counts = db_service.count_embeddings() if db_service else {'products': 0, 'customers': 0, 'model_versions': 0}
+    
     return {
         "name": "E-Commerce Recommendation API",
         "version": "2.0.0",
         "status": "running",
+        "pgvector_enabled": db_service.pgvector_enabled if db_service else False,
+        "embeddings": embedding_counts,
         "strategies": {
-            "cf": "Collaborative Filtering (user-user similarity)",
-            "content": "Content-Based Filtering (product similarity)",
-            "hybrid": "Hybrid (60% CF + 40% Content)",
+            "cf": "Collaborative Filtering (pgvector-backed customer similarity)",
+            "content": "Content-Based Filtering (pgvector-backed product similarity)",
+            "hybrid": "Hybrid (60% CF + 40% Content, both pgvector-backed)",
             "popular": "Popularity-Based (trending products)"
         },
+        "note": "All recommendation strategies now use pgvector for embeddings storage and similarity search",
         "endpoints": {
             "docs": "/docs",
             "health": "/health",
@@ -349,7 +426,7 @@ async def root():
             "similar_customers": "/similar-customers/{customer_id}",
             "similar_products": "/similar-products/{product_id}",
             "metrics": "/metrics",
-            "retrain": "/retrain"
+            "retrain": "/retrain (POST - required before first use)"
         }
     }
 

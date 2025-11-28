@@ -24,13 +24,13 @@ class RecommendationEngine:
     def __init__(self, db_service: DatabaseService):
         self.db = db_service
         self.user_item_matrix = None
-        self.similarity_matrix = None
         self.customer_ids = None
         self.product_ids = None
+        self.current_model_version_id = None
         self.last_trained = None
         self.scaler = StandardScaler()
 
-        logger.info("Recommendation engine initialized")
+        logger.info("Recommendation engine initialized (pgvector-backed)")
 
     def load_data(self):
         """Load purchase data and create user-item matrix"""
@@ -65,95 +65,170 @@ class RecommendationEngine:
             logger.error(f"Error loading data: {e}")
             raise
 
-    def compute_similarity(self):
-        """Compute customer-customer similarity matrix"""
+    def compute_similarity(self, model_version_id: int):
+        """
+        Compute customer embeddings and store directly to database.
+        Uses normalized user-item vectors as customer embeddings.
+        
+        Args:
+            model_version_id: ID of the model version to associate embeddings with
+        """
         try:
-            logger.info("Computing customer similarity...")
+            logger.info("Computing customer embeddings from purchase patterns...")
 
             if self.user_item_matrix is None:
                 raise ValueError("Data not loaded. Call load_data() first.")
+            
+            if not self.db.pgvector_enabled:
+                raise RuntimeError("pgvector is required but not enabled")
 
-            # Normalize the matrix (important for fair comparison)
-            normalized = self.scaler.fit_transform(self.user_item_matrix.values)
-
-            # Compute cosine similarity between customers
-            self.similarity_matrix = cosine_similarity(normalized)
-
-            # Set diagonal to 0 (customer is not similar to themselves)
-            np.fill_diagonal(self.similarity_matrix, 0)
-
+            # Normalize user-item matrix to create customer embeddings
+            from sklearn.preprocessing import normalize
+            import numpy as np
+            
+            embeddings_list = []
+            target_dim = 128  # Match database vector dimension
+            
+            for idx, customer_id in enumerate(self.customer_ids):
+                # Get customer's purchase vector
+                customer_vector = self.user_item_matrix.iloc[idx].values
+                
+                # Pad to exactly 128 dimensions if needed
+                actual_dim = len(customer_vector)
+                if actual_dim < target_dim:
+                    padding = np.zeros(target_dim - actual_dim)
+                    customer_vector = np.hstack([customer_vector, padding])
+                elif actual_dim > target_dim:
+                    customer_vector = customer_vector[:target_dim]
+                
+                # Normalize to unit L2 norm
+                customer_embedding = normalize(
+                    customer_vector.reshape(1, -1),
+                    norm='l2'
+                )[0]
+                
+                embeddings_list.append((customer_id, customer_embedding.tolist()))
+            
+            # Batch insert to database
+            count = self.db.batch_upsert_customer_embeddings(
+                embeddings_list,
+                model_version_id
+            )
+            
+            self.current_model_version_id = model_version_id
             self.last_trained = datetime.now()
 
-            logger.info("✓ Similarity matrix computed")
+            logger.info(f"✓ Computed and stored {count} customer embeddings to database")
 
         except Exception as e:
-            logger.error(f"Error computing similarity: {e}")
+            logger.error(f"Error computing customer embeddings: {e}")
             raise
 
     def get_recommendations(
         self,
         customer_id: int,
         top_n: int = 5,
-        similarity_threshold: float = 0.1
+        similarity_threshold: float = 0.1,
+        k_similar_customers: int = 20
     ) -> List[Dict[str, Any]]:
         """
-        Get product recommendations for a customer.
-
+        Get product recommendations using pgvector-backed collaborative filtering.
+        
+        Workflow:
+        1. Get customer embedding from database
+        2. Find k similar customers via ANN search
+        3. Get products purchased by similar customers
+        4. Aggregate and rank products
+        5. Exclude already-purchased items
+        
         Args:
             customer_id: Customer ID
             top_n: Number of recommendations to return
-            similarity_threshold: Minimum similarity score to consider
+            similarity_threshold: Minimum similarity score (not used with pgvector distance)
+            k_similar_customers: Number of similar customers to consider
 
         Returns:
             List of recommendations with product_id, score, and reason
         """
         try:
-            # Check if customer exists in our data
-            if customer_id not in self.customer_ids:
-                logger.warning(f"Customer {customer_id} not found, returning popular items")
+            if not self.db.pgvector_enabled:
+                raise RuntimeError("pgvector is required but not enabled")
+            
+            # Get customer embedding from database
+            customer_embedding = self.db.get_customer_embedding(customer_id)
+            
+            if customer_embedding is None:
+                logger.warning(f"No embedding found for customer {customer_id}, returning popular items")
                 return self._get_popular_items(top_n)
 
-            # Get customer index
-            customer_idx = self.customer_ids.index(customer_id)
+            # Find similar customers via pgvector ANN search
+            similar_customers = self.db.get_similar_customers_pgvector(
+                customer_id,
+                k=k_similar_customers
+            )
 
-            # Get similarity scores for this customer
-            similarities = self.similarity_matrix[customer_idx]
-
-            # Find similar customers (above threshold)
-            similar_mask = similarities > similarity_threshold
-            similar_indices = np.where(similar_mask)[0]
-
-            if len(similar_indices) == 0:
+            if not similar_customers:
                 logger.warning(f"No similar customers found for {customer_id}")
                 return self._get_popular_items(top_n)
 
-            # Get top N similar customers
-            top_similar_indices = similar_indices[
-                np.argsort(similarities[similar_indices])[::-1][:10]
-            ]
+            # Get products purchased by similar customers with weighted scores
+            similar_customer_ids = [c['customer_id'] for c in similar_customers]
+            
+            # Query purchases for similar customers
+            query = """
+                SELECT p.product_id, SUM(p.quantity) as total_quantity
+                FROM purchases p
+                WHERE p.customer_id = ANY(%s)
+                GROUP BY p.product_id
+            """
+            
+            cur = self.db.conn.cursor()
+            cur.execute(query, (similar_customer_ids,))
+            purchase_results = cur.fetchall()
+            cur.close()
+            
+            # Get products current customer has already purchased (for exclusion)
+            exclude_products = self.db.get_customer_purchased_product_ids(customer_id)
+            
+            # Calculate scores weighted by customer similarity
+            product_scores = {}
+            similarity_map = {c['customer_id']: c['distance'] for c in similar_customers}
+            
+            # Get who bought what
+            purchase_by_customer_query = """
+                SELECT customer_id, product_id, SUM(quantity) as quantity
+                FROM purchases
+                WHERE customer_id = ANY(%s)
+                GROUP BY customer_id, product_id
+            """
+            
+            cur = self.db.conn.cursor()
+            cur.execute(purchase_by_customer_query, (similar_customer_ids,))
+            customer_purchases = cur.fetchall()
+            cur.close()
+            
+            for cust_id, prod_id, quantity in customer_purchases:
+                if prod_id in exclude_products:
+                    continue
+                
+                distance = similarity_map.get(cust_id, 1.0)
+                # Weight by inverse distance (smaller distance = higher weight)
+                similarity_weight = 1.0 / (distance + 0.001)
+                
+                if prod_id not in product_scores:
+                    product_scores[prod_id] = 0
+                product_scores[prod_id] += similarity_weight * quantity
 
-            # Get products purchased by similar customers
-            similar_purchases = self.user_item_matrix.iloc[top_similar_indices]
+            if not product_scores:
+                logger.warning(f"No recommendations found for customer {customer_id} after filtering")
+                return self._get_popular_items(top_n)
 
-            # Get products current customer hasn't purchased
-            customer_purchases = self.user_item_matrix.iloc[customer_idx]
-            not_purchased_mask = customer_purchases == 0
-
-            # Calculate scores for unpurchased products
-            # Score = weighted sum of purchases by similar customers
-            scores = np.zeros(len(self.product_ids))
-
-            for idx in top_similar_indices:
-                similarity_weight = similarities[idx]
-                scores += similar_purchases.iloc[
-                    list(top_similar_indices).index(idx)
-                ].values * similarity_weight
-
-            # Filter to only unpurchased products
-            scores = scores * not_purchased_mask.values
-
-            # Get top N products
-            top_product_indices = np.argsort(scores)[::-1][:top_n]
+            # Sort by score and get top N
+            sorted_products = sorted(
+                product_scores.items(),
+                key=lambda x: x[1],
+                reverse=True
+            )[:top_n]
 
             # Fetch product details
             all_products = self.db.get_all_products()
@@ -161,27 +236,24 @@ class RecommendationEngine:
 
             # Build recommendations
             recommendations = []
-            for idx in top_product_indices:
-                if scores[idx] > 0:  # Only include products with positive scores
-                    product_id = int(self.product_ids[idx])
-                    product_info = product_map.get(product_id, {})
+            for product_id, score in sorted_products:
+                product_info = product_map.get(product_id, {})
 
-                    recommendations.append({
-                        'product_id': product_id,
-                        'score': float(scores[idx]),
-                        'reason': 'customers_like_you',
-                        'name': product_info.get('name', ''),
-                        'category': product_info.get('category', ''),
-                        'price': float(product_info.get('price', 0.0))
-                    })
+                recommendations.append({
+                    'product_id': int(product_id),
+                    'score': float(score),
+                    'reason': 'customers_like_you',
+                    'name': product_info.get('name', ''),
+                    'category': product_info.get('category', ''),
+                    'price': float(product_info.get('price', 0.0))
+                })
 
             # If we don't have enough recommendations, fill with popular items
             if len(recommendations) < top_n:
                 popular = self._get_popular_items(top_n - len(recommendations))
-                # Filter out already recommended products
                 recommended_ids = {r['product_id'] for r in recommendations}
                 for item in popular:
-                    if item['product_id'] not in recommended_ids:
+                    if item['product_id'] not in recommended_ids and item['product_id'] not in exclude_products:
                         recommendations.append(item)
 
             return recommendations[:top_n]
@@ -196,7 +268,7 @@ class RecommendationEngine:
         top_n: int = 5
     ) -> List[Dict[str, Any]]:
         """
-        Find customers with similar purchase patterns.
+        Find customers with similar purchase patterns using pgvector.
 
         Args:
             customer_id: Customer ID
@@ -206,27 +278,33 @@ class RecommendationEngine:
             List of similar customers with similarity scores
         """
         try:
-            if customer_id not in self.customer_ids:
-                raise ValueError(f"Customer {customer_id} not found")
-
-            # Get customer index
-            customer_idx = self.customer_ids.index(customer_id)
-
-            # Get similarity scores
-            similarities = self.similarity_matrix[customer_idx]
-
-            # Get top N similar customers (excluding self)
-            top_indices = np.argsort(similarities)[::-1][:top_n]
-
-            similar_customers = []
-            for idx in top_indices:
-                if similarities[idx] > 0:  # Only include positive similarities
-                    similar_customers.append({
-                        'customer_id': int(self.customer_ids[idx]),
-                        'similarity_score': float(similarities[idx])
-                    })
-
-            return similar_customers
+            if not self.db.pgvector_enabled:
+                raise RuntimeError("pgvector is required but not enabled")
+            
+            # Use pgvector to find similar customers
+            similar_customers = self.db.get_similar_customers_pgvector(
+                customer_id,
+                k=top_n
+            )
+            
+            if not similar_customers:
+                logger.warning(f"No similar customers found for {customer_id}")
+                return []
+            
+            # Convert distance to similarity score
+            result = []
+            for customer in similar_customers:
+                distance = customer['distance']
+                # Convert L2 distance to similarity (0 = identical, 2 = opposite for normalized vectors)
+                similarity_score = max(0, 1 - (distance / 2))
+                
+                result.append({
+                    'customer_id': int(customer['customer_id']),
+                    'similarity_score': float(similarity_score),
+                    'distance': float(distance)
+                })
+            
+            return result
 
         except Exception as e:
             logger.error(f"Error finding similar customers: {e}")
@@ -283,7 +361,7 @@ class RecommendationEngine:
         """Check if model is trained and ready"""
         return (
             self.user_item_matrix is not None and
-            self.similarity_matrix is not None
+            self.current_model_version_id is not None
         )
 
     def get_customer_count(self) -> int:
@@ -318,3 +396,9 @@ class RecommendationEngine:
         except Exception as e:
             logger.error(f"Error getting metrics: {e}")
             raise
+
+    def get_embedding_dimension(self) -> int:
+        """Get the dimension of customer embeddings (number of products)"""
+        if self.product_ids:
+            return len(self.product_ids)
+        return 0
