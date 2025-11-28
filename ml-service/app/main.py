@@ -23,6 +23,7 @@ from app.services.content_based_recommender import ContentBasedRecommender
 from app.services.hybrid_recommender import HybridRecommender
 from app.services.customer_embedding_generator import CustomerEmbeddingGenerator
 from app.services.database import DatabaseService
+from app.services.cache import CacheService
 
 # Configure logging
 logging.basicConfig(
@@ -37,6 +38,7 @@ cf_recommender = None
 content_recommender = None
 hybrid_recommender = None
 customer_embedding_generator = None
+cache_service: Optional[CacheService] = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -72,6 +74,15 @@ async def lifespan(app: FastAPI):
         )
         logger.info("✓ Hybrid recommender ready")
         
+        # Initialize cache service (Redis)
+        redis_url = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
+        cache_ttl = int(os.getenv('CACHE_TTL', '300'))
+        cache_service = CacheService(url=redis_url, ttl=cache_ttl)
+        try:
+            await cache_service.connect()
+        except Exception:
+            logger.warning("Redis cache not available; continuing without cache")
+
         logger.info("⚠️  Run POST /retrain to load data and compute embeddings")
 
         yield
@@ -84,6 +95,8 @@ async def lifespan(app: FastAPI):
         logger.info("Shutting down ML Recommendation Service...")
         if db_service:
             db_service.close()
+        if cache_service:
+            await cache_service.close()
 
 # Create FastAPI app
 app = FastAPI(
@@ -166,6 +179,18 @@ async def get_recommendations(
     try:
         logger.info(f"Getting {strategy} recommendations for customer {customer_id}")
 
+        # Check cache first
+        cached = None
+        try:
+            if cache_service:
+                cached = await cache_service.get_recommendations(customer_id, strategy.name.lower(), limit)
+        except Exception:
+            cached = None
+
+        if cached:
+            logger.info(f"Returning cached recommendations for customer {customer_id} (strategy={strategy})")
+            return [RecommendationResponse(**r) for r in cached]
+
         # Select recommender based on strategy
         if strategy == RecommendationStrategy.HYBRID:
             recommendations = hybrid_recommender.get_recommendations(
@@ -195,7 +220,7 @@ async def get_recommendations(
         else:
             raise HTTPException(status_code=400, detail=f"Unknown strategy: {strategy}")
 
-        return [
+        response = [
             RecommendationResponse(
                 product_id=rec['product_id'],
                 score=rec['score'],
@@ -203,6 +228,16 @@ async def get_recommendations(
             )
             for rec in recommendations
         ]
+
+        # Store in cache (best-effort)
+        try:
+            if cache_service:
+                # Serialize list of dicts
+                await cache_service.set_recommendations(customer_id, strategy.name.lower(), limit, [r.dict() for r in response])
+        except Exception as e:
+            logger.debug(f"Failed to set recommendation cache: {e}")
+
+        return response
 
     except Exception as e:
         logger.error(f"Error getting recommendations: {e}")
@@ -366,6 +401,13 @@ async def retrain_model():
         embedding_counts = db_service.count_embeddings()
 
         logger.info("✓ All models retrained and embeddings persisted successfully")
+        # Invalidate recommendation cache after retrain
+        try:
+            if cache_service:
+                await cache_service.invalidate_all_recommendations()
+                logger.info("✓ Invalidated all recommendation cache after retrain")
+        except Exception:
+            logger.warning("Failed to invalidate cache after retrain")
 
         return {
             "status": "success",
@@ -399,6 +441,34 @@ async def get_metrics():
 
     except Exception as e:
         logger.error(f"Error getting metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/cache/invalidate/{customer_id}", tags=["Cache"])
+async def invalidate_customer_cache(customer_id: int):
+    """Invalidate cache entries for a specific customer"""
+    try:
+        if cache_service:
+            await cache_service.invalidate_recommendations_for_customer(customer_id)
+            return {"status": "ok", "message": f"Invalidated cache for customer {customer_id}"}
+        else:
+            raise HTTPException(status_code=503, detail="Cache service not available")
+    except Exception as e:
+        logger.error(f"Error invalidating cache for {customer_id}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/cache/invalidate_all", tags=["Cache"])
+async def invalidate_all_cache():
+    """Invalidate all recommendation cache entries"""
+    try:
+        if cache_service:
+            await cache_service.invalidate_all_recommendations()
+            return {"status": "ok", "message": "Invalidated all recommendation cache"}
+        else:
+            raise HTTPException(status_code=503, detail="Cache service not available")
+    except Exception as e:
+        logger.error(f"Error invalidating all cache: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/", tags=["Info"])

@@ -198,6 +198,18 @@ updated_at       TIMESTAMPTZ DEFAULT NOW()
 ## Configuration
 
 ### TF-IDF Parameters
+
+## Cache (Redis)
+
+- The ML service supports an optional Redis cache for recommendations.
+- Set `REDIS_URL` environment variable (default `redis://localhost:6379/0`).
+- Set `CACHE_TTL` environment variable to control recommendation TTL in seconds (default 300).
+
+Cache endpoints:
+
+- `POST /cache/invalidate/{customer_id}` — invalidate cached recommendations for a customer
+- `POST /cache/invalidate_all` — invalidate all recommendation cache
+
 Edit `app/services/content_based_recommender.py`:
 ```python
 self.tfidf_vectorizer = TfidfVectorizer(

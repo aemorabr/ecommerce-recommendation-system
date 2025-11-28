@@ -34,6 +34,7 @@ services:
       DB_USER: postgres
       DB_PASSWORD: postgres
       DB_PORT: 5432
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
     depends_on:
@@ -82,6 +83,15 @@ services:
     networks:
       - ecommerce-network
     restart: unless-stopped
+
+  # Redis cache for recommendations
+  redis:
+    image: redis:7-alpine
+    container_name: ecommerce-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - ecommerce-network
 
 volumes:
   postgres_data:
